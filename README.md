@@ -99,7 +99,7 @@ secure_boot_fuse_state = 3:Incomplete 2:Incomplete 1:Incomplete 0:Used
 | `opn` | Orderable part number |
 | `revision` | Hardware revision |
 | `oob_mac` | Out-of-band management MAC address |
-| `atf_version` | ARM Trusted Firmware version (DICE BL1/BL2) |
+| `atf_version` | ARM Trusted Firmware version (secure boot stages) |
 | `uefi_version` | UEFI firmware version |
 | `bsp_version` | Board Support Package version |
 | `fw_version` | ConnectX firmware version |
@@ -134,7 +134,7 @@ secure_boot_fuse_state = 3:Incomplete 2:Incomplete 1:Incomplete 0:Used
 │              BlueField-3 Hardware                            │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
 │  │   ERoT   │  │   ATF    │  │   UEFI   │  │ ConnectX │     │
-│  │(HW Fuses)│  │ (BL1/2)  │  │          │  │    FW    │     │
+│  │ (SecCtl) │  │ (BL1/2)  │  │          │  │    FW    │     │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -143,7 +143,7 @@ secure_boot_fuse_state = 3:Incomplete 2:Incomplete 1:Incomplete 0:Used
 
 - The query script reads from sysfs (no credentials required)
 - `mlxconfig` requires root access to query hardware settings
-- No sensitive data is logged or cached beyond security posture
+- Cache contains device identifiers (UUID, serial, MAC) and security posture; files are root-readable only
 - Debug logging can be enabled with `BF3_DEBUG=1` environment variable
 
 ## BlueField-3 Security Architecture
@@ -152,7 +152,7 @@ The BlueField-3 DPU implements a hardware root of trust using:
 
 - **ERoT (Embedded Root of Trust)**: Dedicated security controller with its own firmware
 - **DICE (Device Identifier Composition Engine)**: TCG standard for hardware-based device identity
-- **ARM Trusted Firmware (ATF)**: Secure world bootloader implementing measured boot
+- **ARM Trusted Firmware (ATF)**: Secure world firmware providing the verified boot chain
 - **Secure Boot Fuses**: One-time programmable fuses that lock the device into production mode
 
 When `lifecycle_state` is "GA Secured" and `hardware_rot_status` is "Enforced", the DPU has:
