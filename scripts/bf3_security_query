@@ -21,10 +21,34 @@ Copyright (c) 2024 Nelson Melo
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+# Allowed column names for output (security: prevents injection via malformed sysfs)
+ALLOWED_COLUMNS = frozenset({
+    "lifecycle_state",
+    "secure_boot_fuse_state",
+    "hardware_rot_status",
+    "uefi_secure_boot",
+    "device_uuid",
+    "serial_number",
+    "sku",
+    "opn",
+    "revision",
+    "oob_mac",
+    "atf_version",
+    "uefi_version",
+    "bsp_version",
+    "fw_version",
+    "crypto_policy",
+    "dpa_authentication",
+})
+
+# Valid MST device path pattern (e.g., /dev/mst/mt41692_pciconf0 or mt41692_pciconf0.1)
+MST_DEVICE_PATTERN = re.compile(r"^/dev/mst/mt\d+_pciconf\d+(\.\d+)?$")
 
 # Configure logging
 logging.basicConfig(
@@ -66,31 +90,37 @@ def read_sysfs(path: str) -> str:
         return ""
 
 
-def run_cmd(cmd: str, timeout: int = 5) -> str:
+def run_cmd(args: list, timeout: int = 5) -> str:
     """
-    Run a shell command and return stdout.
+    Run a command with argument list and return stdout.
 
-    Security note: Only used with hardcoded commands, not user input.
+    Security: Uses argument list (no shell) to prevent command injection.
     """
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            args,
             capture_output=True,
             text=True,
             timeout=timeout
         )
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
-        logger.warning(f"Command timed out: {cmd}")
+        logger.warning(f"Command timed out: {args[0]}")
+        return ""
+    except FileNotFoundError:
+        logger.debug(f"Command not found: {args[0]}")
         return ""
     except Exception as e:
-        logger.debug(f"Command failed: {cmd}: {e}")
+        logger.debug(f"Command failed: {args[0]}: {e}")
         return ""
 
 
 def find_mst_device() -> Optional[str]:
-    """Auto-detect the MST device path for mlxconfig."""
+    """
+    Auto-detect the MST device path for mlxconfig.
+
+    Security: Validates device path against strict pattern to prevent injection.
+    """
     mst_dir = Path("/dev/mst")
     if not mst_dir.exists():
         return None
@@ -98,8 +128,17 @@ def find_mst_device() -> Optional[str]:
     # Look for pciconf device (BlueField)
     for device in mst_dir.iterdir():
         if "pciconf" in device.name:
-            logger.debug(f"Found MST device: {device}")
-            return str(device)
+            device_path = str(device.resolve())  # Resolve symlinks
+            # Validate against strict pattern to prevent injection
+            if not MST_DEVICE_PATTERN.match(device_path):
+                logger.warning(f"MST device path failed validation: {device_path}")
+                continue
+            # Verify it's a character device, not a symlink to something else
+            if not device.is_char_device():
+                logger.warning(f"MST path is not a character device: {device_path}")
+                continue
+            logger.debug(f"Found MST device: {device_path}")
+            return device_path
     return None
 
 
@@ -204,8 +243,8 @@ def get_security_info() -> dict:
     # UEFI Secure Boot
     info["uefi_secure_boot"] = get_uefi_secure_boot()
 
-    # Firmware versions from bfver
-    bfver_output = run_cmd("bfver 2>/dev/null | grep -E 'ATF|UEFI|BSP'")
+    # Firmware versions from bfver (no shell, parse in Python)
+    bfver_output = run_cmd(["bfver"])
     versions = parse_bfver_output(bfver_output)
     info["atf_version"] = versions.get("atf_version", "")
     info["uefi_version"] = versions.get("uefi_version", "")
@@ -214,13 +253,10 @@ def get_security_info() -> dict:
     # ConnectX firmware version
     info["fw_version"] = read_sysfs("/sys/class/infiniband/mlx5_0/fw_ver")
 
-    # Crypto policy from mlxconfig (requires root)
+    # Crypto policy from mlxconfig (requires root, no shell)
     mst_device = find_mst_device()
     if mst_device:
-        mlxconfig_output = run_cmd(
-            f"sudo mlxconfig -d {mst_device} q 2>/dev/null | "
-            "grep -E 'CRYPTO_POLICY|DPA_AUTHENTICATION'"
-        )
+        mlxconfig_output = run_cmd(["mlxconfig", "-d", mst_device, "q"])
         settings = parse_mlxconfig_output(mlxconfig_output)
         info["crypto_policy"] = settings.get("crypto_policy", "")
         info["dpa_authentication"] = settings.get("dpa_authentication", "")
@@ -237,11 +273,22 @@ def get_security_info() -> dict:
     return info
 
 
+def sanitize_output(info: dict) -> dict:
+    """
+    Filter output to only allowed columns.
+
+    Security: Prevents injection via malformed sysfs or unexpected keys.
+    """
+    return {k: v for k, v in info.items() if k in ALLOWED_COLUMNS}
+
+
 def main():
     """Main entry point."""
     try:
         info = get_security_info()
-        print(json.dumps(info, indent=2))
+        # Security: Only output allowed columns
+        sanitized = sanitize_output(info)
+        print(json.dumps(sanitized, indent=2))
         return 0
     except Exception as e:
         logger.error(f"Failed to collect security info: {e}")

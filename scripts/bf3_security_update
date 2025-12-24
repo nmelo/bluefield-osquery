@@ -8,7 +8,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-CACHE_DIR="${BF3_CACHE_DIR:-/var/cache}"
+# Security: Hardcoded cache directory, no environment override
+CACHE_DIR="/var/cache"
 JSON_FILE="${CACHE_DIR}/bf3_security.json"
 DB_FILE="${CACHE_DIR}/bf3_security.db"
 
@@ -22,32 +23,70 @@ else
     exit 1
 fi
 
+# Security: Create files with restrictive permissions before writing
+install -m 600 /dev/null "${JSON_FILE}.tmp"
+install -m 600 /dev/null "${DB_FILE}.tmp"
+
 # Generate JSON
-"${QUERY_SCRIPT}" > "${JSON_FILE}" 2>/dev/null
+"${QUERY_SCRIPT}" > "${JSON_FILE}.tmp" 2>/dev/null
 
 # Convert to SQLite for osquery ATC
-python3 << PYSCRIPT
+python3 << 'PYSCRIPT'
 import json
+import os
+import re
 import sqlite3
 import sys
 
+# Security: Allowlist of valid column names (must match bf3_security_query)
+ALLOWED_COLUMNS = frozenset({
+    "lifecycle_state",
+    "secure_boot_fuse_state",
+    "hardware_rot_status",
+    "uefi_secure_boot",
+    "device_uuid",
+    "serial_number",
+    "sku",
+    "opn",
+    "revision",
+    "oob_mac",
+    "atf_version",
+    "uefi_version",
+    "bsp_version",
+    "fw_version",
+    "crypto_policy",
+    "dpa_authentication",
+})
+
+# Security: Column name must be alphanumeric with underscores only
+SAFE_COL_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+json_file = "/var/cache/bf3_security.json.tmp"
+db_file = "/var/cache/bf3_security.db.tmp"
+
 try:
-    with open("${JSON_FILE}") as f:
+    with open(json_file) as f:
         data = json.load(f)
 
-    conn = sqlite3.connect("${DB_FILE}")
-    c = conn.cursor()
-    cols = list(data.keys())
+    # Security: Validate and filter columns against allowlist
+    cols = [c for c in data.keys() if c in ALLOWED_COLUMNS and SAFE_COL_PATTERN.match(c)]
+    if not cols:
+        print("Error: No valid columns found in JSON", file=sys.stderr)
+        sys.exit(1)
 
-    # Create table with proper schema
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+
+    # Create table with validated columns only
     c.execute("DROP TABLE IF EXISTS bf3_security")
     col_defs = ", ".join([f'"{col}" TEXT' for col in cols])
     c.execute(f"CREATE TABLE bf3_security ({col_defs})")
 
-    # Insert data
+    # Insert data with parameterized query
     placeholders = ", ".join(["?" for _ in cols])
+    col_names = ", ".join([f'"{col}"' for col in cols])
     values = [str(data.get(col, "")) for col in cols]
-    c.execute(f"INSERT INTO bf3_security VALUES ({placeholders})", values)
+    c.execute(f"INSERT INTO bf3_security ({col_names}) VALUES ({placeholders})", values)
 
     conn.commit()
     conn.close()
@@ -55,3 +94,10 @@ except Exception as e:
     print(f"Error updating database: {e}", file=sys.stderr)
     sys.exit(1)
 PYSCRIPT
+
+# Atomically move temp files to final location
+mv "${JSON_FILE}.tmp" "${JSON_FILE}"
+mv "${DB_FILE}.tmp" "${DB_FILE}"
+
+# Ensure final files have correct permissions
+chmod 600 "${JSON_FILE}" "${DB_FILE}"
