@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BlueField-3 Security Posture Query for osquery
+
+Exposes hardware root of trust data from NVIDIA BlueField-3 DPUs including:
+- DICE/ERoT lifecycle state and secure boot fuse status
+- UEFI Secure Boot configuration
+- ARM Trusted Firmware (ATF) versions
+- Crypto policy and DPA authentication settings
+
+Data sources:
+- Primary: sysfs (always available on ARM)
+- Secondary: mlxconfig (requires mst driver)
+- Tertiary: bfver utility
+
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2024 Nelson Melo
+"""
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG if os.environ.get("BF3_DEBUG") else logging.WARNING,
+    format="%(levelname)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# BlueField platform device paths
+MLNXBF_BOOTCTL_PATHS = [
+    "/sys/devices/platform/MLNXBF04:00",  # BlueField-3
+    "/sys/devices/platform/MLNXBF03:00",  # BlueField-2
+]
+
+
+def find_bf_sysfs_path() -> Optional[str]:
+    """Find the BlueField boot control sysfs path."""
+    for path in MLNXBF_BOOTCTL_PATHS:
+        if Path(path).exists():
+            logger.debug(f"Found BlueField sysfs at {path}")
+            return path
+    logger.warning("No BlueField sysfs path found")
+    return None
+
+
+def read_sysfs(path: str) -> str:
+    """Safely read a sysfs file."""
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.debug(f"Sysfs file not found: {path}")
+        return ""
+    except PermissionError:
+        logger.warning(f"Permission denied reading: {path}")
+        return ""
+    except Exception as e:
+        logger.debug(f"Error reading {path}: {e}")
+        return ""
+
+
+def run_cmd(cmd: str, timeout: int = 5) -> str:
+    """
+    Run a shell command and return stdout.
+
+    Security note: Only used with hardcoded commands, not user input.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Command timed out: {cmd}")
+        return ""
+    except Exception as e:
+        logger.debug(f"Command failed: {cmd}: {e}")
+        return ""
+
+
+def find_mst_device() -> Optional[str]:
+    """Auto-detect the MST device path for mlxconfig."""
+    mst_dir = Path("/dev/mst")
+    if not mst_dir.exists():
+        return None
+
+    # Look for pciconf device (BlueField)
+    for device in mst_dir.iterdir():
+        if "pciconf" in device.name:
+            logger.debug(f"Found MST device: {device}")
+            return str(device)
+    return None
+
+
+def get_uefi_secure_boot() -> str:
+    """Read UEFI Secure Boot status from EFI variables."""
+    secureboot_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
+    if not Path(secureboot_path).exists():
+        return "Unknown"
+
+    try:
+        with open(secureboot_path, "rb") as f:
+            data = f.read()
+            # Last byte indicates secure boot status
+            return "Enabled" if data[-1] == 1 else "Disabled"
+    except Exception as e:
+        logger.debug(f"Error reading SecureBoot EFI var: {e}")
+        return "Unknown"
+
+
+def parse_bfver_output(output: str) -> dict:
+    """Parse bfver command output for version information."""
+    versions = {}
+    for line in output.split("\n"):
+        line = line.strip()
+        if ":" in line:
+            if "ATF" in line:
+                versions["atf_version"] = line.split(":")[-1].strip()
+            elif "UEFI" in line:
+                versions["uefi_version"] = line.split(":")[-1].strip()
+            elif "BSP" in line:
+                versions["bsp_version"] = line.split(":")[-1].strip()
+    return versions
+
+
+def parse_mlxconfig_output(output: str) -> dict:
+    """Parse mlxconfig query output for security settings."""
+    settings = {}
+    for line in output.split("\n"):
+        parts = line.split()
+        if len(parts) >= 2:
+            if "CRYPTO_POLICY" in line:
+                settings["crypto_policy"] = parts[1]
+            elif "DPA_AUTHENTICATION" in line:
+                settings["dpa_authentication"] = parts[1]
+    return settings
+
+
+def determine_rot_status(lifecycle_state: str, fuse_state: str) -> str:
+    """
+    Determine hardware root of trust enforcement status.
+
+    Returns:
+        Enforced: Production-locked with active fuses
+        Configured: Production mode but fuses incomplete
+        Development: Development/debug mode
+        Unknown: Cannot determine
+    """
+    if lifecycle_state == "GA Secured":
+        if "0:Used" in fuse_state:
+            return "Enforced"
+        return "Configured"
+    elif "Development" in lifecycle_state:
+        return "Development"
+    return "Unknown"
+
+
+def get_security_info() -> dict:
+    """
+    Collect BlueField-3 security posture information.
+
+    Returns:
+        Dictionary containing hardware root of trust attributes
+    """
+    info = {}
+
+    # Find BlueField sysfs path
+    bf_path = find_bf_sysfs_path()
+
+    if bf_path:
+        # Hardware root of trust attributes
+        info["lifecycle_state"] = read_sysfs(f"{bf_path}/lifecycle_state")
+        info["secure_boot_fuse_state"] = read_sysfs(f"{bf_path}/secure_boot_fuse_state")
+
+        # Device identity
+        info["device_uuid"] = read_sysfs(f"{bf_path}/uuid")
+        info["serial_number"] = read_sysfs(f"{bf_path}/sn")
+        info["sku"] = read_sysfs(f"{bf_path}/sku")
+        info["opn"] = read_sysfs(f"{bf_path}/opn")
+        info["revision"] = read_sysfs(f"{bf_path}/rev")
+        info["oob_mac"] = read_sysfs(f"{bf_path}/oob_mac")
+    else:
+        info["lifecycle_state"] = ""
+        info["secure_boot_fuse_state"] = ""
+        info["device_uuid"] = ""
+        info["serial_number"] = ""
+        info["sku"] = ""
+        info["opn"] = ""
+        info["revision"] = ""
+        info["oob_mac"] = ""
+
+    # UEFI Secure Boot
+    info["uefi_secure_boot"] = get_uefi_secure_boot()
+
+    # Firmware versions from bfver
+    bfver_output = run_cmd("bfver 2>/dev/null | grep -E 'ATF|UEFI|BSP'")
+    versions = parse_bfver_output(bfver_output)
+    info["atf_version"] = versions.get("atf_version", "")
+    info["uefi_version"] = versions.get("uefi_version", "")
+    info["bsp_version"] = versions.get("bsp_version", "")
+
+    # ConnectX firmware version
+    info["fw_version"] = read_sysfs("/sys/class/infiniband/mlx5_0/fw_ver")
+
+    # Crypto policy from mlxconfig (requires root)
+    mst_device = find_mst_device()
+    if mst_device:
+        mlxconfig_output = run_cmd(
+            f"sudo mlxconfig -d {mst_device} q 2>/dev/null | "
+            "grep -E 'CRYPTO_POLICY|DPA_AUTHENTICATION'"
+        )
+        settings = parse_mlxconfig_output(mlxconfig_output)
+        info["crypto_policy"] = settings.get("crypto_policy", "")
+        info["dpa_authentication"] = settings.get("dpa_authentication", "")
+    else:
+        info["crypto_policy"] = ""
+        info["dpa_authentication"] = ""
+
+    # Derived security posture
+    info["hardware_rot_status"] = determine_rot_status(
+        info.get("lifecycle_state", ""),
+        info.get("secure_boot_fuse_state", "")
+    )
+
+    return info
+
+
+def main():
+    """Main entry point."""
+    try:
+        info = get_security_info()
+        print(json.dumps(info, indent=2))
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to collect security info: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
