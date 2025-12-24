@@ -40,7 +40,7 @@ The extension exposes NVIDIA BlueField-3 DPU hardware root of trust data as a SQ
 │         ▼              ▼           ▼           ▼              ▼             │
 │    ┌─────────┐   ┌──────────┐ ┌─────────┐ ┌─────────┐   ┌──────────┐        │
 │    │  sysfs  │   │ mlxconfig│ │  bfver  │ │EFI vars │   │ InfiniBand│       │
-│    │MLNXBF04 │   │ (no sudo)│ │         │ │SecureBoot│  │  sysfs   │        │
+│    │MLNXBF04 │   │ (root)   │ │ (root)  │ │SecureBoot│  │  sysfs   │        │
 │    └─────────┘   └──────────┘ └─────────┘ └─────────┘   └──────────┘        │
 │         │              │           │           │              │             │
 │    lifecycle     crypto_policy  ATF/UEFI   secure_boot    fw_version        │
@@ -76,11 +76,11 @@ The extension exposes NVIDIA BlueField-3 DPU hardware root of trust data as a SQ
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| **ATC + SQLite** | No compilation, works with stock osquery, easy to debug | Requires cron job, slight data staleness |
+| **ATC + SQLite** | No compilation, works with stock osquery, easy to debug | Requires cron job, up to 5-minute data staleness |
 | **C++ Extension** | Real-time data, native performance | Requires C++ build chain, osquery SDK, harder to maintain |
 | **Python Extension** | Real-time data, easier than C++ | Requires osquery-python, Thrift dependency |
 
-**Rationale**: ATC is the pragmatic choice for a specialized hardware platform. The DPU's security posture changes infrequently (only on firmware updates or reconfiguration), so 5-minute staleness is acceptable. The simplicity of deployment outweighs the benefits of real-time queries.
+**Rationale**: ATC is the pragmatic choice for a specialized hardware platform. The DPU's security posture changes infrequently (only on firmware updates or reconfiguration), so 5-minute staleness is acceptable. The simplicity of deployment outweighs the benefits of real-time queries. The cron job runs as root, providing access to mlxconfig and bfver which require elevated privileges.
 
 ### 2. Why Two Scripts Instead of One?
 
@@ -93,7 +93,7 @@ The extension exposes NVIDIA BlueField-3 DPU hardware root of trust data as a SQ
 This separation enables:
 - Testing the query script independently
 - Using the JSON output for other integrations (Prometheus, SIEM)
-- Different security contexts (query can run as non-root for most data)
+- Different security contexts (sysfs data works without root; mlxconfig/bfver require root for full output)
 
 ### 3. Why Not Use shell=True in subprocess?
 
@@ -125,9 +125,10 @@ ALLOWED_COLUMNS = frozenset({
 
 **Threat Model**: A malicious actor with write access to `/sys/devices/platform/MLNXBF04:00/` could potentially create a file with a name that, when used as a column name in SQL, causes injection. While this requires root access (making the attack mostly moot), the allowlist provides defense in depth.
 
-**Tradeoff**: Adding new columns requires updating both scripts. This is acceptable because:
+**Tradeoff**: Adding new columns requires updating both scripts. This duplication is intentional:
 1. New security attributes are rare (firmware updates only)
 2. Explicit is better than implicit for security tooling
+3. A shared module would be a single point of compromise; duplication limits blast radius
 
 ### 5. Why Atomic File Updates?
 
@@ -264,14 +265,17 @@ If real-time queries become important, the codebase is structured to enable migr
 ### Manual Testing
 
 ```bash
-# Run query directly
+# Run query directly (sysfs data only)
 ./scripts/bf3_security_query
 
+# Run with root for full output (includes mlxconfig/bfver data)
+sudo ./scripts/bf3_security_query
+
 # Run with debug logging
-BF3_DEBUG=1 ./scripts/bf3_security_query
+sudo BF3_DEBUG=1 ./scripts/bf3_security_query
 
 # Verify osquery table
-osqueryi "SELECT * FROM bf3_security;"
+sudo osqueryi "SELECT * FROM bf3_security;"
 ```
 
 ### What to Verify
