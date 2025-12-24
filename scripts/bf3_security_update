@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2024 Nelson Melo
+# Copyright (c) 2024-2025 Nelson Melo
 #
 # Update BlueField-3 security data for osquery ATC
 # Run via cron to keep the osquery table current

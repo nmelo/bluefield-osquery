@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2024 Nelson Melo
+# Copyright (c) 2024-2025 Nelson Melo
 #
 # Install BlueField-3 osquery security extension
 
