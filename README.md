@@ -53,10 +53,36 @@ SELECT device_uuid, serial_number, fw_version
 FROM bf3_security;
 ```
 
+Output:
+```
++----------------------------------+---------------+-------------+
+| device_uuid                      | serial_number | fw_version  |
++----------------------------------+---------------+-------------+
+| 8ae8c17e7aa8f01180008c913af47cca | MT2542X00000  | 32.43.1014  |
++----------------------------------+---------------+-------------+
+```
+
 ### Query Full Security State
 
 ```sql
 SELECT * FROM bf3_security;
+```
+
+Output (using `osqueryi --line`):
+```
+       lifecycle_state = GA Secured
+secure_boot_fuse_state = 3:Incomplete 2:Incomplete 1:Incomplete 0:Used
+           device_uuid = 8ae8c17e7aa8f01180008c913af47cca
+         serial_number = MT2542X00000
+                   sku = 900-9D3B6-00CC-EA0
+      uefi_secure_boot = Enabled
+           atf_version = 4.13.1-0-g5fcb148df
+          uefi_version = 4.13.1-14-g8a01157b7f
+           bsp_version = 4.13.1.13827
+            fw_version = 32.43.1014
+         crypto_policy = UNRESTRICTED(1)
+    dpa_authentication = False(0)
+   hardware_rot_status = Enforced
 ```
 
 ## Table Schema
